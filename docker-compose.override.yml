@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.override.yml — Overrides pour le développement local
+# ─────────────────────────────────────────────────────────────────────────────
+# Docker Compose fusionne automatiquement ce fichier avec docker-compose.yml
+# quand on lance `docker compose up` (sans -f explicite).
+#
+# Ne PAS utiliser en production → uniquement pour le dev local.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  api:
+    # En dev : mount du code source pour le hot-reload
+    volumes:
+      - ./app:/app/app:ro         # :ro = read-only (sécurité)
+    environment:
+      - DEBUG=true
+    # Override la commande pour activer le hot-reload uvicorn
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --log-level debug
+    ports:
+      - "8000:8000"               # Expose l'API directement en dev
+
+  worker:
+    volumes:
+      - ./app:/app/app:ro
+    environment:
+      - DEBUG=true
+    command: >
+      celery -A app.workers.celery_app.celery_app worker
+      --loglevel=debug
+      --concurrency=2
+
+  # Prometheus accessible directement en dev
+  prometheus:
+    ports:
+      - "9090:9090"
+
+  # Grafana accessible directement en dev
+  grafana:
+    ports:
+      - "3000:3000"

@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore — Exclure les fichiers inutiles du contexte Docker
+# ─────────────────────────────────────────────────────────────────────────────
+# Réduit la taille du contexte envoyé au daemon Docker → builds plus rapides.
+# Empêche les secrets et fichiers sensibles d'entrer dans l'image.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Environnements virtuels Python
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist
+build
+
+# Secrets — CRITIQUE : ne jamais inclure dans l'image
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+
+# Tests et CI
+tests/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.github/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+
+# Monitoring (configs externes, pas du code app)
+monitoring/
+nginx/
+
+# Divers
+.DS_Store
+Thumbs.db
+*.log
+tmp/

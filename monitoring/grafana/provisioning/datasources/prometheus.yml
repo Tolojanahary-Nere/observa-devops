@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# monitoring/grafana/provisioning/datasources/prometheus.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-provisioning de la datasource Prometheus dans Grafana.
+# Avantage : configuration as code, reproductible, pas de clic manuel.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus_main        # UID fixe → les dashboards peuvent le référencer
+    url: http://prometheus:9090
+    access: proxy               # Grafana contacte Prometheus (pas le navigateur)
+    isDefault: true
+    jsonData:
+      httpMethod: POST          # POST plus performant pour les grandes queries
+      timeInterval: "15s"       # Doit correspondre à scrape_interval Prometheus
+    editable: false             # Empêche la modification via l'UI (GitOps)

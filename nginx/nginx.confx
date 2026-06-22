@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# nginx/nginx.conf — Configuration principale Nginx
+# ─────────────────────────────────────────────────────────────────────────────
+# Rôle : Reverse proxy sécurisé avec rate-limiting, compression et
+#         security headers. Toutes les directives globales sont ici.
+# ─────────────────────────────────────────────────────────────────────────────
+
+user  nginx;
+worker_processes  auto;           # Adapte automatiquement aux CPU disponibles
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+# Optimisation des connexions
+events {
+    worker_connections  1024;     # Max connexions par worker
+    use epoll;                    # epoll : plus performant sur Linux
+    multi_accept on;              # Accepte plusieurs connexions simultanément
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # ── Format de logs structuré (JSON-ready) ─────────────────────────────────
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for" '
+                      'rt=$request_time uct="$upstream_connect_time" '
+                      'uht="$upstream_header_time" urt="$upstream_response_time"';
+
+    access_log  /var/log/nginx/access.log  main;
+
+    # ── Performance ───────────────────────────────────────────────────────────
+    sendfile           on;
+    tcp_nopush         on;
+    tcp_nodelay        on;
+    keepalive_timeout  65;
+    types_hash_max_size 2048;
+    server_tokens off;            # Masque la version Nginx (sécurité)
+
+    # ── Compression Gzip ──────────────────────────────────────────────────────
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json
+               application/javascript application/xml+rss
+               application/atom+xml image/svg+xml;
+
+    # ── Rate Limiting ─────────────────────────────────────────────────────────
+    # Zone "api_limit" : 10 requêtes/seconde par IP
+    # Mémoire : 10MB → ~160 000 IPs distinctes en cache
+    limit_req_zone  $binary_remote_addr  zone=api_limit:10m  rate=10r/s;
+
+    # Zone spéciale pour les métriques (accès interne uniquement)
+    limit_req_zone  $binary_remote_addr  zone=metrics_limit:1m  rate=1r/s;
+
+    # ── Upstream pools (load balancing-ready) ─────────────────────────────────
+    upstream fastapi_backend {
+        server api:8000;
+        keepalive 32;             # Pool de connexions persistantes
+    }
+
+    upstream grafana_backend {
+        server grafana:3000;
+        keepalive 8;
+    }
+
+    # ── Inclusion des configs de serveur ──────────────────────────────────────
+    include /etc/nginx/conf.d/*.conf;
+}

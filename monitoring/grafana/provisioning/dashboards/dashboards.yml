@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# monitoring/grafana/provisioning/dashboards/dashboards.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Indique à Grafana où chercher les fichiers JSON de dashboards.
+# Grafana les charge automatiquement au démarrage → zéro import manuel.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+providers:
+  - name: 'Observa Dashboards'
+    orgId: 1
+    folder: 'Observa'           # Dossier affiché dans l'UI Grafana
+    folderUid: 'observa'
+    type: file
+    disableDeletion: true       # Empêche la suppression via l'UI
+    updateIntervalSeconds: 30   # Rechargement si fichier modifié (hot-reload)
+    allowUiUpdates: false       # Pas de modification via l'UI → GitOps strict
+    options:
+      path: /var/lib/grafana/dashboards

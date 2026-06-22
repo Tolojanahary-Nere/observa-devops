@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.installed.cfg
+
+# Virtualenvs
+.venv
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Tests & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+*.crt
+secrets/
+
+# Logs
+*.log
+logs/
+
+# Docker volumes (si bind-mount)
+postgres_data/
+redis_data/
+grafana_data/
+prometheus_data/

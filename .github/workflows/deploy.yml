@@ -1,0 +1,307 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/deploy.yml — Pipeline CI/CD GitHub Actions
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Pipeline en 3 jobs séquentiels :
+#   1. test    → Lint + Tests + Coverage
+#   2. build   → Build & Push image Docker vers GHCR
+#   3. deploy  → Déploiement SSH sur serveur distant
+#
+# Déclencheurs :
+#   - Push sur `main` (déploiement automatique)
+#   - Pull Request vers `main` (tests + build uniquement, pas de deploy)
+#   - Déclenchement manuel via workflow_dispatch
+#
+# Secrets GitHub requis (à configurer dans Settings → Secrets → Actions) :
+#   GHCR_TOKEN      → Personal Access Token avec scope packages:write
+#   DEPLOY_HOST     → IP ou hostname du serveur de prod
+#   DEPLOY_USER     → User SSH (ex: ubuntu, deploy)
+#   DEPLOY_SSH_KEY  → Clé SSH privée (RSA ou ED25519)
+#   POSTGRES_PASSWORD, REDIS_PASSWORD, SECRET_KEY, GRAFANA_PASSWORD
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 🚀 CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:              # Déclenchement manuel depuis l'UI GitHub
+    inputs:
+      environment:
+        description: 'Environnement cible'
+        required: true
+        default: 'production'
+        type: choice
+        options: [ production, staging ]
+
+# Annuler les runs précédents si un nouveau push arrive (évite les conflits)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Variables globales du workflow
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/observa-api
+  PYTHON_VERSION: "3.12"
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 1 : Tests & Qualité du code
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    name: 🧪 Tests & Lint
+    runs-on: ubuntu-latest
+
+    # Service PostgreSQL pour les tests d'intégration (optionnel si SQLite suffit)
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: [ "6379:6379" ]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 📥 Checkout du code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'            # Cache du venv entre les runs
+
+      - name: 📦 Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-mock aiosqlite
+
+      # ── Lint ─────────────────────────────────────────────────────────────
+      - name: 🔍 Lint avec Ruff (remplace flake8 + isort + pyupgrade)
+        run: |
+          pip install ruff
+          ruff check app/ tests/ --output-format=github
+          ruff format --check app/ tests/
+
+      # ── Tests ────────────────────────────────────────────────────────────
+      - name: ✅ Exécuter pytest avec coverage
+        env:
+          # Variables minimales pour les tests
+          SECRET_KEY: "test-secret-key-not-for-production"
+          POSTGRES_PASSWORD: "test"
+          REDIS_HOST: "localhost"
+          REDIS_PORT: "6379"
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -v \
+            --tb=short
+
+      # ── Upload coverage vers Codecov (optionnel mais pro) ─────────────────
+      - name: 📊 Upload coverage vers Codecov
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false   # Ne fait pas échouer le CI si Codecov est down
+
+      # ── Résumé du job ─────────────────────────────────────────────────────
+      - name: 📝 Résumé des tests
+        if: always()
+        run: |
+          echo "## 🧪 Résultats des tests" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 2 : Build & Push de l'image Docker
+  # Dépend du job `test` — ne tourne que si les tests passent
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    name: 🐳 Build & Push Docker
+    runs-on: ubuntu-latest
+    needs: test                   # Dépendance séquentielle
+    # Ne builder que sur main (pas sur les PRs pour économiser les ressources)
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    # Permissions pour pousser sur GHCR
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: 📥 Checkout du code
+        uses: actions/checkout@v4
+
+      # ── Setup Docker Buildx (builder multi-plateforme) ────────────────────
+      - name: 🔧 Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+
+      # ── Authentification GHCR ─────────────────────────────────────────────
+      - name: 🔐 Login au GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      # ── Génération des tags et labels OCI ─────────────────────────────────
+      # Stratégie de tagging :
+      #   main → latest + sha-<7chars>
+      #   tag v1.2.3 → 1.2.3 + 1.2 + 1 + latest
+      - name: 🏷️ Générer les métadonnées Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Observa API
+            org.opencontainers.image.description=FastAPI async avec observabilité complète
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+
+      # ── Build & Push avec cache GitHub Actions ────────────────────────────
+      - name: 🏗️ Build et Push l'image Docker
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          dockerfile: Dockerfile
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache entre builds (économise ~2-3 minutes par run)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Provenance SBOM pour la sécurité supply-chain
+          provenance: true
+          sbom: true
+
+      # ── Résumé du build ───────────────────────────────────────────────────
+      - name: 📝 Résumé du build
+        run: |
+          echo "## 🐳 Image Docker buildée" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 3 : Déploiement SSH sur serveur distant
+  # Simulation d'un déploiement GitOps via SSH + docker-compose pull
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: 🚢 Déploiement Production
+    runs-on: ubuntu-latest
+    needs: [ test, build ]
+    if: github.ref == 'refs/heads/main'
+
+    # Environnement GitHub pour les protections de déploiement
+    # (reviewers obligatoires, délais, etc. configurables dans GitHub UI)
+    environment:
+      name: production
+      url: https://yourdomain.com
+
+    steps:
+      - name: 📥 Checkout du code
+        uses: actions/checkout@v4
+
+      # ── Déploiement via SSH ────────────────────────────────────────────────
+      # Pattern GitOps :
+      #   1. SSH sur le serveur
+      #   2. git pull (récupère le docker-compose.yml mis à jour)
+      #   3. docker compose pull (télécharge la nouvelle image depuis GHCR)
+      #   4. docker compose up -d (redémarre les services avec la nouvelle image)
+      # Downtime : ~0 grâce au restart graduel de Docker Compose
+      - name: 🚀 Déploiement via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          timeout: 120s
+          command_timeout: 10m
+          script: |
+            set -euo pipefail          # Fail fast sur la première erreur
+
+            echo "📂 Navigation vers le répertoire du projet..."
+            cd ~/apps/observa
+
+            echo "🔑 Login GHCR..."
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io \
+              -u ${{ github.actor }} \
+              --password-stdin
+
+            echo "📥 Pull du code source (docker-compose.yml)..."
+            git pull origin main
+
+            echo "🐳 Pull de la nouvelle image Docker..."
+            IMAGE_TAG=sha-$(echo "${{ github.sha }}" | cut -c1-7)
+            IMAGE_TAG=${IMAGE_TAG} docker compose pull api worker
+
+            echo "🔄 Redémarrage des services..."
+            IMAGE_TAG=${IMAGE_TAG} docker compose up -d \
+              --no-deps \
+              --remove-orphans \
+              api worker
+
+            echo "⏳ Attente du démarrage (30s)..."
+            sleep 30
+
+            echo "🩺 Vérification du health check..."
+            curl --fail --silent --retry 3 --retry-delay 5 \
+              http://localhost/health || exit 1
+
+            echo "🧹 Nettoyage des anciennes images..."
+            docker image prune -f --filter "until=24h"
+
+            echo "✅ Déploiement réussi !"
+            docker compose ps
+
+      # ── Notification de succès ────────────────────────────────────────────
+      - name: 📢 Résumé du déploiement
+        if: success()
+        run: |
+          echo "## 🚀 Déploiement réussi !" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environnement**: Production" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit déployé**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Déclenché par**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://yourdomain.com" >> $GITHUB_STEP_SUMMARY
+
+      # ── Notification d'échec (à remplacer par Slack/PagerDuty en prod) ────
+      - name: 🚨 Alerte en cas d'échec
+        if: failure()
+        run: |
+          echo "## ❌ Déploiement ÉCHOUÉ" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Action requise**: Vérifier les logs et rollback si nécessaire" >> $GITHUB_STEP_SUMMARY
+          echo "**Commande de rollback :**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "ssh ${{ secrets.DEPLOY_USER }}@\$HOST 'cd ~/apps/observa && git revert HEAD && docker compose up -d'" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
